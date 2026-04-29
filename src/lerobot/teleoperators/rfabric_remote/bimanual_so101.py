@@ -28,9 +28,10 @@ and the local ``make run-arms`` target. It glues four pieces together:
 * Two parallel processor pipelines (one per arm), each a single
   :class:`JointVelocityServo` step. There is no IK and no FK in the
   control loop — every operator key maps directly to one motor with a
-  fixed sign. Per-tick motion is ``velocity * step``, with
-  ``step_per_tick_deg`` for actuators and ``gripper_step_per_tick`` for
-  the gripper.
+  fixed sign. Raw normalised velocities are low-passed (see
+  ``--velocity-tau-s``) then integrated into joint targets with
+  ``step_per_tick_deg`` / ``gripper_step_per_tick`` and a bounded lead
+  for loaded-joint stiction.
 * A loop that splits the bimanual observation / action by ``left_`` /
   ``right_`` prefix, runs each through its arm's servo step,
   re-prefixes the resulting joint targets, and dispatches the merged
@@ -96,6 +97,10 @@ DEFAULT_FPS = 60
 # ahead by up to this many degrees gives the PID enough error to
 # break free, while bounding wind-up against mechanical hard stops.
 DEFAULT_TARGET_LEAD_CAP_DEG = 12.0
+# First-order smoothing time constant (seconds) on normalised joint
+# command velocity before integration. Ramps presses/releases so
+# motion is less abrupt; ``0`` disables (instant step to ±1).
+DEFAULT_VELOCITY_TAU_SECONDS = 0.10
 # Lerobot's SO-101 calibration burns the recorded ``range_min`` /
 # ``range_max`` directly into each motor's EEPROM as
 # ``Min/Max_Position_Limit``. If during the range-of-motion phase the
@@ -313,6 +318,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "loaded joints (the SO-101 elbow under gravity is the "
             "worst case) at the cost of more wind-up torque against "
             f"mechanical hard stops. Default: {DEFAULT_TARGET_LEAD_CAP_DEG:g}°."
+        ),
+    )
+    parser.add_argument(
+        "--velocity-tau-s",
+        type=float,
+        default=DEFAULT_VELOCITY_TAU_SECONDS,
+        help=(
+            "Low-pass time constant (seconds) on normalised per-joint "
+            "velocity before integration — softer start/stop. "
+            f"0 disables smoothing (default: {DEFAULT_VELOCITY_TAU_SECONDS:g}s)."
         ),
     )
     parser.add_argument(
@@ -587,6 +602,8 @@ def _build_arm_context(
                 step_per_tick_deg=float(args.joint_step_deg),
                 gripper_step_per_tick=float(args.gripper_step),
                 lead_cap_deg=float(args.target_lead_cap_deg),
+                velocity_tau_seconds=float(args.velocity_tau_s),
+                control_period_seconds=1.0 / max(int(args.fps), 1),
             ),
         ],
         to_transition=robot_action_observation_to_transition,
@@ -744,20 +761,18 @@ def _log_alignment(contexts: Sequence[ArmContext]) -> None:
 
 
 def _log_axis_convention(args: argparse.Namespace) -> None:
-    """Print the active control gains on startup.
+    """Print the active control gains on startup."""
 
-    There is no IK in the control path: each operator key/button is
-    bound to one motor with a fixed sign, and the per-tick servo step
-    is a simple ``q_target = q_present + velocity * step``.
-    """
-
+    tau = float(args.velocity_tau_s)
+    tau_note = "off" if tau <= 0.0 else f"{tau:g}s"
     LOG.info(
         "rfabric_remote: per-servo joint-velocity teleop "
         "(joint_step=%.2f deg/tick, gripper_step=%.1f/tick, "
-        "lead_cap=%.1f° @ %d Hz)",
+        "lead_cap=%.1f°, velocity_tau=%s @ %d Hz)",
         float(args.joint_step_deg),
         float(args.gripper_step),
         float(args.target_lead_cap_deg),
+        tau_note,
         int(args.fps),
     )
 

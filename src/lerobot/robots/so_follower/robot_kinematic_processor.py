@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -456,6 +457,15 @@ class JointVelocityServo(RobotActionProcessorStep):
     ``enabled=False`` (or a missing velocity) holds every joint at its
     present position and clears any accumulated lead.
 
+    Before integration, each joint's raw command velocity is passed
+    through a first-order low-pass toward its target so presses ramp
+    gently. When the operator releases (raw goes to zero), the
+    **smoothed** velocity still decays for a few ticks — integration
+    continues with that decay so the joint eases out instead of
+    snapping still. Once smoothed magnitude drops below
+    :attr:`velocity_idle_epsilon`, the actuator target latches to the
+    live reading for gravity hold.
+
     Input action keys (produced by
     :func:`~lerobot.teleoperators.rfabric_remote.action_mapping.map_payload_to_joint_velocity`,
     with any per-arm prefix already stripped):
@@ -483,6 +493,18 @@ class JointVelocityServo(RobotActionProcessorStep):
             overcome static friction on loaded joints (the elbow under
             gravity is the worst case on the SO-101) without producing
             damaging torque against mechanical hard stops.
+        velocity_tau_seconds: Time constant (seconds) for smoothing raw
+            ``[-1, 1]`` command velocities toward the operator input.
+            ``0`` disables smoothing (instant step). Larger values make
+            ramps slower and softer.
+        control_period_seconds: Nominal control tick duration used with
+            ``velocity_tau_seconds`` to compute the per-tick blend
+            factor ``1 - exp(-dt / tau)``.
+        velocity_idle_epsilon: When both raw and smoothed command
+            velocities are below this magnitude (after release), the
+            actuator target latches to ``present`` for holding. Larger
+            values shorten the coast-out tail; too large clips the end
+            of the ramp early.
     """
 
     motor_names: list[str] = field(default_factory=list)
@@ -492,17 +514,20 @@ class JointVelocityServo(RobotActionProcessorStep):
     gripper_clip_max: float = 100.0
     velocity_key_prefix: str = "vel_"
     lead_cap_deg: float = 12.0
+    velocity_tau_seconds: float = 0.10
+    control_period_seconds: float = 1.0 / 60.0
+    velocity_idle_epsilon: float = 0.04
 
     def __post_init__(self) -> None:
-        # Per-actuator integrating target (deg). Latched to the live
-        # reading on the release edge (so the motor stops where the
-        # arm actually is, not where the integrator's lead pointed),
-        # then held — which lets gravity-driven drift produce position
-        # error and resisting torque on loaded joints.
         self._target_deg: dict[str, float] = {}
-        # Previous-tick velocity per actuator, used to detect the
-        # rising and falling edges of an operator key press.
-        self._previous_velocity: dict[str, float] = {}
+        self._previous_raw_velocity: dict[str, float] = {}
+        self._smoothed_velocity: dict[str, float] = {}
+        self._gripper_hold_target: dict[str, float] = {}
+
+    def _velocity_blend_factor(self) -> float:
+        if self.velocity_tau_seconds <= 0.0:
+            return 1.0
+        return 1.0 - math.exp(-self.control_period_seconds / self.velocity_tau_seconds)
 
     def action(self, action: RobotAction) -> RobotAction:
         observation = self.transition.get(TransitionKey.OBSERVATION)
@@ -510,23 +535,33 @@ class JointVelocityServo(RobotActionProcessorStep):
             raise ValueError("JointVelocityServo requires the joint observation in the transition.")
 
         enabled = bool(action.pop("enabled", False))
+        blend = self._velocity_blend_factor()
 
         for motor in self.motor_names:
             present = float(observation[f"{motor}.pos"])
-            velocity = float(action.pop(f"{self.velocity_key_prefix}{motor}", 0.0))
+            raw_velocity = float(action.pop(f"{self.velocity_key_prefix}{motor}", 0.0))
             if not enabled:
-                velocity = 0.0
+                raw_velocity = 0.0
+            previous_smoothed = self._smoothed_velocity.get(motor, 0.0)
+            smoothed_velocity = previous_smoothed + blend * (raw_velocity - previous_smoothed)
+            self._smoothed_velocity[motor] = smoothed_velocity
 
             if motor == "gripper":
-                target = float(
-                    np.clip(
-                        present + velocity * self.gripper_step_per_tick,
-                        self.gripper_clip_min,
-                        self.gripper_clip_max,
-                    )
+                target = self._gripper_target_from_smoothed_velocity(
+                    motor=motor,
+                    present=present,
+                    raw_velocity=raw_velocity,
+                    smoothed_velocity=smoothed_velocity,
+                    previous_smoothed=previous_smoothed,
                 )
             else:
-                target = self._integrate_actuator_target(motor, present, velocity)
+                target = self._integrate_actuator_target(
+                    motor,
+                    present,
+                    smoothed_velocity=smoothed_velocity,
+                    raw_velocity=raw_velocity,
+                    previous_smoothed=previous_smoothed,
+                )
 
             action[f"{motor}.pos"] = float(target)
 
@@ -537,41 +572,70 @@ class JointVelocityServo(RobotActionProcessorStep):
             action.pop(key, None)
         return action
 
-    def _integrate_actuator_target(self, motor: str, present: float, velocity: float) -> float:
+    def _gripper_target_from_smoothed_velocity(
+        self,
+        *,
+        motor: str,
+        present: float,
+        raw_velocity: float,
+        smoothed_velocity: float,
+        previous_smoothed: float,
+    ) -> float:
+        eps_raw = 1e-12
+        eps_idle = self.velocity_idle_epsilon
+        previous_raw = self._previous_raw_velocity.get(motor, 0.0)
+        self._previous_raw_velocity[motor] = raw_velocity
+        fully_idle = abs(raw_velocity) < eps_raw and abs(smoothed_velocity) < eps_idle
+        if fully_idle:
+            had_motion = (abs(previous_raw) >= eps_raw) or (abs(previous_smoothed) >= eps_idle)
+            if had_motion or motor not in self._gripper_hold_target:
+                self._gripper_hold_target[motor] = float(
+                    np.clip(present, self.gripper_clip_min, self.gripper_clip_max)
+                )
+            return self._gripper_hold_target[motor]
+        return float(
+            np.clip(
+                present + smoothed_velocity * self.gripper_step_per_tick,
+                self.gripper_clip_min,
+                self.gripper_clip_max,
+            )
+        )
+
+    def _integrate_actuator_target(
+        self,
+        motor: str,
+        present: float,
+        *,
+        smoothed_velocity: float,
+        raw_velocity: float,
+        previous_smoothed: float,
+    ) -> float:
         """Advance the integrating target for one actuator joint.
 
-        Edge-triggered behaviour:
-
-        * **Release edge** (previous tick non-zero, this tick zero):
-          latch the target at the live reading. The motor stops where
-          the arm physically is, not at the integrator's lead-ahead
-          target.
-        * **Sustained hold** (previous and current tick both zero):
-          freeze the target at the latched value. As gravity drifts
-          ``present`` away from it, the position error grows and the
-          Feetech PID develops counter-torque — which is what produces
-          gravity-resisting holding force on loaded joints like the
-          shoulder_lift.
-        * **Press edge / sustained drive** (current tick non-zero):
-          integrate from the previous target so a stalled motor
-          accumulates lead until the position error overcomes static
-          friction. Direction reversal drops any stale lead so the
-          joint reverses immediately. The lead is clamped to
-          :attr:`lead_cap_deg` on either side of ``present`` to bound
-          torque against mechanical hard stops.
+        While raw or smoothed command is non-trivial, integrate with
+        ``smoothed_velocity * step`` (lead-capped). When the operator
+        releases, raw hits zero first but smoothed decays — integration
+        continues so the joint coasts down. Once both are below
+        :attr:`velocity_idle_epsilon`, latch ``present`` for gravity
+        hold. Direction reversal uses raw sign against lead.
         """
 
-        previous_velocity = self._previous_velocity.get(motor, 0.0)
-        self._previous_velocity[motor] = velocity
+        eps_raw = 1e-12
+        eps_idle = self.velocity_idle_epsilon
+        previous_raw = self._previous_raw_velocity.get(motor, 0.0)
+        self._previous_raw_velocity[motor] = raw_velocity
 
-        if velocity == 0.0:
-            if previous_velocity != 0.0 or motor not in self._target_deg:
+        fully_idle = abs(raw_velocity) < eps_raw and abs(smoothed_velocity) < eps_idle
+        if fully_idle:
+            had_motion = (abs(previous_raw) >= eps_raw) or (abs(previous_smoothed) >= eps_idle)
+            if had_motion or motor not in self._target_deg:
                 self._target_deg[motor] = present
             return self._target_deg[motor]
+
         previous_target = self._target_deg.get(motor, present)
-        if velocity * (previous_target - present) < 0.0:
+        if raw_velocity * (previous_target - present) < 0.0:
             previous_target = present
-        candidate_target = previous_target + velocity * self.step_per_tick_deg
+        candidate_target = previous_target + smoothed_velocity * self.step_per_tick_deg
         upper_bound = present + self.lead_cap_deg
         lower_bound = present - self.lead_cap_deg
         clamped_target = max(lower_bound, min(upper_bound, candidate_target))
