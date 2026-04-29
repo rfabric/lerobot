@@ -17,9 +17,20 @@
 PYTHON_PATH := $(shell which python)
 
 # If uv is installed and a virtual environment exists, use it
-UV_CHECK := $(shell command -v uv)
+# UV_CHECK := $(shell command -v uv)
+# ifneq ($(UV_CHECK),)
+# 	PYTHON_PATH := $(shell .venv/bin/python)
+# endif
+
+
+# If uv is installed and a virtual environment exists, use it.
+# Never run `python` inside $(shell …) — an interactive interpreter
+# steals the TTY and looks like `make` "turned into" Python (>>>).
+UV_CHECK := $(shell command -v uv 2>/dev/null)
 ifneq ($(UV_CHECK),)
-	PYTHON_PATH := $(shell .venv/bin/python)
+ifneq ($(wildcard .venv/bin/python),)
+	PYTHON_PATH := $(CURDIR)/.venv/bin/python
+endif
 endif
 
 export PATH := $(dir $(PYTHON_PATH)):$(PATH)
@@ -178,3 +189,197 @@ test-smolvla-ete-eval:
 		--env.episode_length=5 \
 		--eval.n_episodes=1 \
 		--eval.batch_size=1
+
+
+
+LEADER_LEFT_PORT=/dev/tty.wchusbserial5AAF2181801
+FOLLOWER_LEFT_PORT=/dev/tty.wchusbserial5AAF2202361
+
+LEADER_RIGHT_PORT=/dev/tty.wchusbserial5AE70493031
+FOLLOWER_RIGHT_PORT=/dev/tty.wchusbserial5AE70450321
+
+port:
+	lerobot-find-port
+
+setup\:leader\:left:
+	lerobot-setup-motors \
+    --teleop.type=so101_leader \
+    --teleop.port=$(LEADER_LEFT_PORT)
+
+setup\:leader\:right:
+	lerobot-setup-motors \
+    --teleop.type=so101_leader \
+    --teleop.port=$(LEADER_RIGHT_PORT)
+
+
+setup\:follower\:left:
+	lerobot-setup-motors \
+    --robot.type=so101_follower \
+    --robot.port=$(FOLLOWER_LEFT_PORT)
+
+setup\:follower\:right:
+	lerobot-setup-motors \
+    --robot.type=so101_follower \
+    --robot.port=$(FOLLOWER_RIGHT_PORT)
+
+
+calibrate\:leader\:left:
+	lerobot-calibrate \
+    --teleop.type=so101_leader \
+    --teleop.port=$(LEADER_LEFT_PORT) \
+    --teleop.id=left_arm_lead
+
+calibrate\:leader\:right:
+	lerobot-calibrate \
+    --teleop.type=so101_leader \
+    --teleop.port=$(LEADER_RIGHT_PORT) \
+    --teleop.id=right_arm_lead
+
+calibrate\:follower\:left:
+	lerobot-calibrate \
+		--robot.type=so101_follower \
+		--robot.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.id=left_arm
+
+calibrate\:follower\:right:
+	lerobot-calibrate \
+		--robot.type=so101_follower \
+		--robot.port=$(FOLLOWER_RIGHT_PORT) \
+		--robot.id=right_arm
+
+calibrate\:rfabric\:left:
+	lerobot-calibrate \
+		--robot.type=so101_follower \
+		--robot.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.id=rfabric_bimanual_left
+
+calibrate\:rfabric\:right:
+	lerobot-calibrate \
+		--robot.type=so101_follower \
+		--robot.port=$(FOLLOWER_RIGHT_PORT) \
+		--robot.id=rfabric_bimanual_right
+
+calibrate\:rfabric: calibrate\:rfabric\:left calibrate\:rfabric\:right
+
+tele\:left:
+	lerobot-teleoperate \
+		--robot.type=so101_follower \
+		--robot.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.id=left_arm \
+		--teleop.type=so101_leader \
+		--teleop.port=$(LEADER_LEFT_PORT) \
+		--teleop.id=left_arm_lead \
+
+# --display_data=true
+
+tele\:right:
+	lerobot-teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=$(FOLLOWER_RIGHT_PORT) \
+    --robot.id=right_arm \
+    --teleop.type=so101_leader \
+    --teleop.port=$(LEADER_RIGHT_PORT) \
+    --teleop.id=right_arm_lead \
+
+# --display_data=true
+tele\:bi:
+	lerobot-teleoperate \
+		--robot.type=bi_so101_follower \
+		--robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+		--robot.id=bimanual_follower \
+		--robot.left_arm_id=left_arm \
+		--robot.right_arm_id=right_arm \
+		--teleop.type=bi_so101_leader \
+		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
+		--teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
+		--teleop.id=bimanual_leader \
+		--teleop.left_arm_id=left_arm_lead \
+		--teleop.right_arm_id=right_arm_lead \
+
+# --display_data=true
+
+
+# --robot.cameras='{
+#   left: {"type": "opencv", "index_or_path": 0, "width": 1920, "height": 1080, "fps": 30},
+#   top: {"type": "opencv", "index_or_path": 1, "width": 1920, "height": 1080, "fps": 30},
+#   right: {"type": "opencv", "index_or_path": 2, "width": 1920, "height": 1080, "fps": 30}
+# }' \
+
+
+tele\:cam:
+	lerobot-teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/tty.wchusbserial5AAF2202361 \
+    --robot.id=follower \
+		--robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/tty.wchusbserial5AAF2181801 \
+    --teleop.id=leader \
+		--display_data=true
+
+
+tele\:bi\:cam:
+	lerobot-teleoperate \
+    --robot.type=bi_so101_follower \
+		--robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+		--robot.id=bimanual_follower \
+		--robot.left_arm_id=left_arm \
+		--robot.right_arm_id=right_arm \
+		--robot.cameras="{ left: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, right: {type: opencv, index_or_path: 1, width: 640, height: 480, fps: 30}, top: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
+		--teleop.type=bi_so101_leader \
+		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
+		--teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
+		--teleop.id=bimanual_leader \
+		--teleop.left_arm_id=left_arm_lead \
+		--teleop.right_arm_id=right_arm_lead \
+		--display_data=true
+
+DATASET_ROOT := data/$(shell date +%Y%m%d_%H%M%S)
+
+record:
+	AWS_PROFILE=lute lerobot-record \
+    --robot.type=bi_so101_follower \
+    --robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+    --robot.id=bimanual_follower \
+		--robot.left_arm_id=left_arm \
+		--robot.right_arm_id=right_arm \
+    --robot.cameras="{ left: {type: opencv, index_or_path: 2, width: 1920, height: 1080, fps: 30, rotation: 180}, right: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30, rotation: 180}, top: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30, rotation: 0}}" \
+    --teleop.type=bi_so101_leader \
+    --teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
+		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
+    --teleop.id=bimanual_leader \
+		--teleop.left_arm_id=left_arm_lead \
+		--teleop.right_arm_id=right_arm_lead \
+		--dataset.repo_id=lerobot/bimanual \
+		--dataset.root=$(DATASET_ROOT) \
+    --dataset.num_episodes=1 \
+		--dataset.episode_time_s=45 \
+		--dataset.reset_time_s=5 \
+    --dataset.single_task="Bimanual task" \
+		--dataset.push_to_hub=true \
+		--dataset.remote.type=s3 \
+		--dataset.remote.s3.bucket=lute-datasets-raw-ingest-dev
+
+# --dataset.num_image_writer_processes=4 \
+# --display_data=true \
+
+replay:
+	lerobot-replay \
+    --robot.type=bi_so101_follower \
+    --robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+    --robot.id=bimanual_follower \
+		--robot.left_arm_id=left_arm \
+		--robot.right_arm_id=right_arm \
+		--dataset.repo_id=lerobot/bimanual \
+		--dataset.root=data/20260403_172709 \
+		--dataset.episode=0
+
+viz:
+	lerobot-dataset-viz \
+    --repo-id lerobot/test2 \
+    --mode local \
+    --episode-index 0

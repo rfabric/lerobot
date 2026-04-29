@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,23 @@ from lerobot.processor import (
     TransitionKey,
 )
 from lerobot.utils.rotation import Rotation
+
+
+def joint_position_array_from_observation(
+    observation: RobotObservation, motor_names: Sequence[str]
+) -> np.ndarray:
+    """Return joint positions stacked in ``motor_names`` order.
+
+    Observations use string keys such as ``\"shoulder_pan.pos\"``. Dict
+    iteration order is not guaranteed to match the URDF /
+    :class:`~lerobot.model.kinematics.RobotKinematics` joint ordering, so
+    FK/IK must assemble ``q`` strictly in ``motor_names`` order.
+    """
+
+    return np.array(
+        [float(observation[f"{motor_name}.pos"]) for motor_name in motor_names],
+        dtype=float,
+    )
 
 
 @ProcessorStepRegistry.register("ee_reference_and_delta")
@@ -59,6 +77,8 @@ class EEReferenceAndDelta(RobotActionProcessorStep):
         reference_ee_pose: Internal state storing the latched reference pose.
         _prev_enabled: Internal state to detect the rising edge of the enable signal.
         _command_when_disabled: Internal state to hold the last command while disabled.
+        delta_position_in_reference_frame: If True, scale ``target_*`` deltas with
+            ``ref[:3,:3]`` so motion follows the tool; if False, add deltas in fixed world axes.
     """
 
     kinematics: RobotKinematics
@@ -68,6 +88,11 @@ class EEReferenceAndDelta(RobotActionProcessorStep):
         True  # If True, latch reference on enable; if False, always use current pose
     )
     use_ik_solution: bool = False
+    # If True, ``target_{x,y,z}`` deltas are interpreted in the reference
+    # EE frame (columns of ``ref[:3,:3]``), so "right" on the operator pad
+    # moves the tool to its own +X. If False, deltas are in the fixed URDF
+    # world frame (legacy phone demos).
+    delta_position_in_reference_frame: bool = False
 
     reference_ee_pose: np.ndarray | None = field(default=None, init=False, repr=False)
     _prev_enabled: bool = field(default=False, init=False, repr=False)
@@ -82,16 +107,7 @@ class EEReferenceAndDelta(RobotActionProcessorStep):
         if self.use_ik_solution and "IK_solution" in self.transition.get(TransitionKey.COMPLEMENTARY_DATA):
             q_raw = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)["IK_solution"]
         else:
-            q_raw = np.array(
-                [
-                    float(v)
-                    for k, v in observation.items()
-                    if isinstance(k, str)
-                    and k.endswith(".pos")
-                    and k.removesuffix(".pos") in self.motor_names
-                ],
-                dtype=float,
-            )
+            q_raw = joint_position_array_from_observation(observation, self.motor_names)
 
         if q_raw is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
@@ -126,10 +142,14 @@ class EEReferenceAndDelta(RobotActionProcessorStep):
                 ],
                 dtype=float,
             )
+            if self.delta_position_in_reference_frame:
+                delta_world = ref[:3, :3] @ delta_p
+            else:
+                delta_world = delta_p
             r_abs = Rotation.from_rotvec([wx, wy, wz]).as_matrix()
             desired = np.eye(4, dtype=float)
             desired[:3, :3] = ref[:3, :3] @ r_abs
-            desired[:3, 3] = ref[:3, 3] + delta_p
+            desired[:3, 3] = ref[:3, 3] + delta_world
 
             self._command_when_disabled = desired.copy()
         else:
@@ -221,13 +241,12 @@ class EEBoundsAndSafety(RobotActionProcessorStep):
         # Clip position
         pos = np.clip(pos, self.end_effector_bounds["min"], self.end_effector_bounds["max"])
 
-        # Check for jumps in position
+        # Moderate jumps in position: scale down overshoot to max step length.
         if self._last_pos is not None:
             dpos = pos - self._last_pos
             n = float(np.linalg.norm(dpos))
             if n > self.max_ee_step_m and n > 0:
                 pos = self._last_pos + dpos * (self.max_ee_step_m / n)
-                raise ValueError(f"EE jump {n:.3f}m > {self.max_ee_step_m}m")
 
         self._last_pos = pos
 
@@ -264,12 +283,16 @@ class InverseKinematicsEEToJoints(RobotActionProcessorStep):
         q_curr: Internal state storing the last joint positions, used as an initial guess for the IK solver.
         initial_guess_current_joints: If True, use the robot's current joint state as the IK guess.
             If False, use the solution from the previous step.
+        position_weight: Placo position task weight passed to :meth:`RobotKinematics.inverse_kinematics`.
+        orientation_weight: Placo orientation weight; use ``0.0`` for translation-first Cartesian teleop.
     """
 
     kinematics: RobotKinematics
     motor_names: list[str]
     q_curr: np.ndarray | None = field(default=None, init=False, repr=False)
     initial_guess_current_joints: bool = True
+    position_weight: float = 1.0
+    orientation_weight: float = 0.01
 
     def action(self, action: RobotAction) -> RobotAction:
         x = action.pop("ee.x")
@@ -289,10 +312,7 @@ class InverseKinematicsEEToJoints(RobotActionProcessorStep):
         if observation is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
 
-        q_raw = np.array(
-            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
-            dtype=float,
-        )
+        q_raw = joint_position_array_from_observation(observation, self.motor_names)
         if q_raw is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
 
@@ -308,10 +328,14 @@ class InverseKinematicsEEToJoints(RobotActionProcessorStep):
         t_des[:3, 3] = [x, y, z]
 
         # Compute inverse kinematics
-        q_target = self.kinematics.inverse_kinematics(self.q_curr, t_des)
+        q_target = self.kinematics.inverse_kinematics(
+            self.q_curr,
+            t_des,
+            position_weight=self.position_weight,
+            orientation_weight=self.orientation_weight,
+        )
         self.q_curr = q_target
 
-        # TODO: This is sentitive to order of motor_names = q_target mapping
         for i, name in enumerate(self.motor_names):
             if name != "gripper":
                 action[f"{name}.pos"] = float(q_target[i])
@@ -369,12 +393,7 @@ class GripperVelocityToJoint(RobotActionProcessorStep):
         if observation is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
 
-        q_raw = np.array(
-            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
-            dtype=float,
-        )
-        if q_raw is None:
-            raise ValueError("Joints observation is require for computing robot kinematics")
+        gripper_present = float(observation["gripper.pos"])
 
         if self.discrete_gripper:
             # Discrete gripper actions are in [0, 1, 2]
@@ -382,10 +401,10 @@ class GripperVelocityToJoint(RobotActionProcessorStep):
             # We need to shift them to [-1, 0, 1] and then scale them to clip_max
             gripper_vel = (gripper_vel - 1) * self.clip_max
 
-        # Compute desired gripper position
+        # Compute desired gripper position (read present gripper by key so
+        # it stays correct regardless of dict iteration order).
         delta = gripper_vel * float(self.speed_factor)
-        # TODO: This assumes gripper is the last specified joint in the robot
-        gripper_pos = float(np.clip(q_raw[-1] + delta, self.clip_min, self.clip_max))
+        gripper_pos = float(np.clip(gripper_present + delta, self.clip_min, self.clip_max))
         action["ee.gripper_pos"] = gripper_pos
 
         return action
@@ -398,6 +417,176 @@ class GripperVelocityToJoint(RobotActionProcessorStep):
             type=FeatureType.ACTION, shape=(1,)
         )
 
+        return features
+
+
+@ProcessorStepRegistry.register("joint_velocity_servo")
+@dataclass
+class JointVelocityServo(RobotActionProcessorStep):
+    """Integrate per-joint normalised velocities into joint position targets.
+
+    The operator UI emits one normalised velocity per servo (range
+    ``[-1, 1]``) and this step converts it into a per-tick position
+    command for the follower. Two integration shapes are used:
+
+    * **Actuators** (everything except the gripper). The target marches
+      forward independently of the live joint reading::
+
+          target ← clamp(prev_target + velocity * step,
+                          present - lead_cap, present + lead_cap)
+
+      If the motor tracks the goal cleanly, ``prev_target`` stays near
+      ``present`` and the position error feeding the Feetech PID is
+      small (smooth motion). If the motor lags — e.g. the elbow under
+      gravity load briefly fails to overcome static friction — the
+      target keeps advancing while ``present`` doesn't, the position
+      error grows, and the PID develops more torque to break free.
+      The lead cap bounds this windup so a sustained stall against a
+      mechanical hard stop never produces unbounded torque.
+
+    * **Gripper** (``"gripper"``). Pure direct-drive integration in the
+      ``[0, 100]`` range::
+
+          target ← clamp(present + velocity * gripper_step, 0, 100)
+
+      The gripper has no inertia worth integrating across ticks and
+      its position scale is bounded, so the simpler form is strictly
+      better here.
+
+    ``enabled=False`` (or a missing velocity) holds every joint at its
+    present position and clears any accumulated lead.
+
+    Input action keys (produced by
+    :func:`~lerobot.teleoperators.rfabric_remote.action_mapping.map_payload_to_joint_velocity`,
+    with any per-arm prefix already stripped):
+
+        ``enabled`` (bool), ``vel_<joint>`` (float, ``[-1, 1]``).
+
+    Output action keys: ``<joint>.pos`` for every motor in
+    :attr:`motor_names` (degrees for actuators; ``[clip_min, clip_max]``
+    for the gripper).
+
+    Attributes:
+        motor_names: Bus-ordered motor names. The gripper, if present,
+            is named ``"gripper"`` and uses :attr:`gripper_step_per_tick`
+            instead of :attr:`step_per_tick_deg`.
+        step_per_tick_deg: Per-tick angular gain (deg) for non-gripper
+            joints at full input (``vel = ±1``).
+        gripper_step_per_tick: Per-tick gain for the gripper joint at
+            full input. The gripper is range-normalised to
+            ``[gripper_clip_min, gripper_clip_max]``.
+        gripper_clip_min, gripper_clip_max: Hard clamp on the gripper
+            command (default ``0..100`` to match lerobot's gripper range).
+        lead_cap_deg: Maximum signed lead the integrating target may
+            hold over the live joint reading for actuators. Sized to
+            give the Feetech PID a position error large enough to
+            overcome static friction on loaded joints (the elbow under
+            gravity is the worst case on the SO-101) without producing
+            damaging torque against mechanical hard stops.
+    """
+
+    motor_names: list[str] = field(default_factory=list)
+    step_per_tick_deg: float = 2.0
+    gripper_step_per_tick: float = 6.0
+    gripper_clip_min: float = 0.0
+    gripper_clip_max: float = 100.0
+    velocity_key_prefix: str = "vel_"
+    lead_cap_deg: float = 12.0
+
+    def __post_init__(self) -> None:
+        # Per-actuator integrating target (deg). Latched to the live
+        # reading on the release edge (so the motor stops where the
+        # arm actually is, not where the integrator's lead pointed),
+        # then held — which lets gravity-driven drift produce position
+        # error and resisting torque on loaded joints.
+        self._target_deg: dict[str, float] = {}
+        # Previous-tick velocity per actuator, used to detect the
+        # rising and falling edges of an operator key press.
+        self._previous_velocity: dict[str, float] = {}
+
+    def action(self, action: RobotAction) -> RobotAction:
+        observation = self.transition.get(TransitionKey.OBSERVATION)
+        if observation is None:
+            raise ValueError("JointVelocityServo requires the joint observation in the transition.")
+
+        enabled = bool(action.pop("enabled", False))
+
+        for motor in self.motor_names:
+            present = float(observation[f"{motor}.pos"])
+            velocity = float(action.pop(f"{self.velocity_key_prefix}{motor}", 0.0))
+            if not enabled:
+                velocity = 0.0
+
+            if motor == "gripper":
+                target = float(
+                    np.clip(
+                        present + velocity * self.gripper_step_per_tick,
+                        self.gripper_clip_min,
+                        self.gripper_clip_max,
+                    )
+                )
+            else:
+                target = self._integrate_actuator_target(motor, present, velocity)
+
+            action[f"{motor}.pos"] = float(target)
+
+        # Drop any leftover velocity keys for joints we don't drive
+        # (keeps the action dict tidy if the wire payload referenced
+        # an unknown joint name).
+        for key in [k for k in action if isinstance(k, str) and k.startswith(self.velocity_key_prefix)]:
+            action.pop(key, None)
+        return action
+
+    def _integrate_actuator_target(self, motor: str, present: float, velocity: float) -> float:
+        """Advance the integrating target for one actuator joint.
+
+        Edge-triggered behaviour:
+
+        * **Release edge** (previous tick non-zero, this tick zero):
+          latch the target at the live reading. The motor stops where
+          the arm physically is, not at the integrator's lead-ahead
+          target.
+        * **Sustained hold** (previous and current tick both zero):
+          freeze the target at the latched value. As gravity drifts
+          ``present`` away from it, the position error grows and the
+          Feetech PID develops counter-torque — which is what produces
+          gravity-resisting holding force on loaded joints like the
+          shoulder_lift.
+        * **Press edge / sustained drive** (current tick non-zero):
+          integrate from the previous target so a stalled motor
+          accumulates lead until the position error overcomes static
+          friction. Direction reversal drops any stale lead so the
+          joint reverses immediately. The lead is clamped to
+          :attr:`lead_cap_deg` on either side of ``present`` to bound
+          torque against mechanical hard stops.
+        """
+
+        previous_velocity = self._previous_velocity.get(motor, 0.0)
+        self._previous_velocity[motor] = velocity
+
+        if velocity == 0.0:
+            if previous_velocity != 0.0 or motor not in self._target_deg:
+                self._target_deg[motor] = present
+            return self._target_deg[motor]
+        previous_target = self._target_deg.get(motor, present)
+        if velocity * (previous_target - present) < 0.0:
+            previous_target = present
+        candidate_target = previous_target + velocity * self.step_per_tick_deg
+        upper_bound = present + self.lead_cap_deg
+        lower_bound = present - self.lead_cap_deg
+        clamped_target = max(lower_bound, min(upper_bound, candidate_target))
+        self._target_deg[motor] = clamped_target
+        return clamped_target
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        action_features = features[PipelineFeatureType.ACTION]
+        action_features.pop("enabled", None)
+        for key in [k for k in list(action_features) if k.startswith(self.velocity_key_prefix)]:
+            action_features.pop(key, None)
+        for motor in self.motor_names:
+            action_features[f"{motor}.pos"] = PolicyFeature(type=FeatureType.ACTION, shape=(1,))
         return features
 
 
@@ -558,10 +747,7 @@ class InverseKinematicsRLStep(ProcessorStep):
         if observation is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
 
-        q_raw = np.array(
-            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
-            dtype=float,
-        )
+        q_raw = joint_position_array_from_observation(observation, self.motor_names)
         if q_raw is None:
             raise ValueError("Joints observation is require for computing robot kinematics")
 
@@ -580,7 +766,6 @@ class InverseKinematicsRLStep(ProcessorStep):
         q_target = self.kinematics.inverse_kinematics(self.q_curr, t_des)
         self.q_curr = q_target
 
-        # TODO: This is sentitive to order of motor_names = q_target mapping
         for i, name in enumerate(self.motor_names):
             if name != "gripper":
                 action[f"{name}.pos"] = float(q_target[i])
