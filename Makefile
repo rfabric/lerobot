@@ -37,6 +37,21 @@ export PATH := $(dir $(PYTHON_PATH)):$(PATH)
 
 DEVICE ?= cpu
 
+LEROBOT_DIR ?= $(CURDIR)
+LEROBOT_PYTHON ?= $(LEROBOT_DIR)/.venv/bin/python
+LEROBOT_SOCKET ?= /tmp/rfabric/control.sock
+LEROBOT_LEFT_PORT ?= /dev/tty.wchusbserial5AAF2202361
+LEROBOT_RIGHT_PORT ?= /dev/tty.wchusbserial5AE70450321
+# Vendored in the lerobot fork under assets/SO-ARM100 (not assets/Simulation).
+LEROBOT_URDF ?= $(LEROBOT_DIR)/assets/SO-ARM100/Simulation/SO101/so101_new_calib.urdf
+# Passed to ``--robot-id`` so left/right followers get separate calibration JSON
+# (``<id>_left.json`` / ``<id>_right.json``). Never leave this empty.
+LEROBOT_ROBOT_ID ?= rfabric_bimanual
+ARGS ?=
+
+
+
+
 build-user:
 	docker build -f docker/Dockerfile.user -t lerobot-user .
 
@@ -284,18 +299,14 @@ tele\:right:
 # --display_data=true
 tele\:bi:
 	lerobot-teleoperate \
-		--robot.type=bi_so101_follower \
-		--robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
-		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+		--robot.type=bi_so_follower \
+		--robot.left_arm_config.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_config.port=$(FOLLOWER_RIGHT_PORT) \
 		--robot.id=bimanual_follower \
-		--robot.left_arm_id=left_arm \
-		--robot.right_arm_id=right_arm \
-		--teleop.type=bi_so101_leader \
-		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
-		--teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
+		--teleop.type=bi_so_leader \
+		--teleop.left_arm_config.port=$(LEADER_LEFT_PORT) \
+		--teleop.right_arm_config.port=$(LEADER_RIGHT_PORT) \
 		--teleop.id=bimanual_leader \
-		--teleop.left_arm_id=left_arm_lead \
-		--teleop.right_arm_id=right_arm_lead \
 
 # --display_data=true
 
@@ -321,59 +332,51 @@ tele\:cam:
 
 tele\:bi\:cam:
 	lerobot-teleoperate \
-    --robot.type=bi_so101_follower \
-		--robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
-		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+    --robot.type=bi_so_follower \
+		--robot.left_arm_config.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_config.port=$(FOLLOWER_RIGHT_PORT) \
 		--robot.id=bimanual_follower \
-		--robot.left_arm_id=left_arm \
-		--robot.right_arm_id=right_arm \
 		--robot.cameras="{ left: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, right: {type: opencv, index_or_path: 1, width: 640, height: 480, fps: 30}, top: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
-		--teleop.type=bi_so101_leader \
-		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
-		--teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
+		--teleop.type=bi_so_leader \
+		--teleop.left_arm_config.port=$(LEADER_LEFT_PORT) \
+		--teleop.right_arm_config.port=$(LEADER_RIGHT_PORT) \
 		--teleop.id=bimanual_leader \
-		--teleop.left_arm_id=left_arm_lead \
-		--teleop.right_arm_id=right_arm_lead \
 		--display_data=true
 
 DATASET_ROOT := data/$(shell date +%Y%m%d_%H%M%S)
 
 record:
-	AWS_PROFILE=lute lerobot-record \
-    --robot.type=bi_so101_follower \
-    --robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
-		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+	lerobot-record \
+    --robot.type=bi_so_follower \
+    --robot.left_arm_config.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_config.port=$(FOLLOWER_RIGHT_PORT) \
     --robot.id=bimanual_follower \
-		--robot.left_arm_id=left_arm \
-		--robot.right_arm_id=right_arm \
-    --robot.cameras="{ left: {type: opencv, index_or_path: 2, width: 1920, height: 1080, fps: 30, rotation: 180}, right: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30, rotation: 180}, top: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30, rotation: 0}}" \
-    --teleop.type=bi_so101_leader \
-    --teleop.right_arm_port=$(LEADER_RIGHT_PORT) \
-		--teleop.left_arm_port=$(LEADER_LEFT_PORT) \
+    --robot.left_arm_config.cameras="{ left: {type: opencv, index_or_path: 2, width: 1920, height: 1080, fps: 30, rotation: 180}, top: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30, rotation: 0}}" \
+    --robot.right_arm_config.cameras="{ right: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30, rotation: 180}}" \
+    --teleop.type=bi_so_leader \
+    --teleop.right_arm_config.port=$(LEADER_RIGHT_PORT) \
+		--teleop.left_arm_config.port=$(LEADER_LEFT_PORT) \
     --teleop.id=bimanual_leader \
-		--teleop.left_arm_id=left_arm_lead \
-		--teleop.right_arm_id=right_arm_lead \
 		--dataset.repo_id=lerobot/bimanual \
 		--dataset.root=$(DATASET_ROOT) \
     --dataset.num_episodes=1 \
-		--dataset.episode_time_s=45 \
 		--dataset.reset_time_s=5 \
     --dataset.single_task="Bimanual task" \
-		--dataset.push_to_hub=true \
-		--dataset.remote.type=s3 \
-		--dataset.remote.s3.bucket=lute-datasets-raw-ingest-dev
+		--dataset.push_to_hub=false
+
+# --dataset.episode_time_s=45 \
+# --dataset.remote.type=s3 \
+# --dataset.remote.s3.bucket=lute-datasets-raw-ingest-dev
 
 # --dataset.num_image_writer_processes=4 \
 # --display_data=true \
 
 replay:
 	lerobot-replay \
-    --robot.type=bi_so101_follower \
-    --robot.left_arm_port=$(FOLLOWER_LEFT_PORT) \
-		--robot.right_arm_port=$(FOLLOWER_RIGHT_PORT) \
+    --robot.type=bi_so_follower \
+    --robot.left_arm_config.port=$(FOLLOWER_LEFT_PORT) \
+		--robot.right_arm_config.port=$(FOLLOWER_RIGHT_PORT) \
     --robot.id=bimanual_follower \
-		--robot.left_arm_id=left_arm \
-		--robot.right_arm_id=right_arm \
 		--dataset.repo_id=lerobot/bimanual \
 		--dataset.root=data/20260403_172709 \
 		--dataset.episode=0
@@ -383,3 +386,14 @@ viz:
     --repo-id lerobot/test2 \
     --mode local \
     --episode-index 0
+
+
+run-arms: ## Start the local lerobot sidecar bound to the agent's UDS.
+	@mkdir -p $(dir $(LEROBOT_SOCKET))
+	cd $(LEROBOT_DIR) && $(LEROBOT_PYTHON) -m lerobot.teleoperators.rfabric_remote.bimanual_so101 \
+		--left-port=$(LEROBOT_LEFT_PORT) \
+		--right-port=$(LEROBOT_RIGHT_PORT) \
+		--urdf=$(LEROBOT_URDF) \
+		--socket-path=$(LEROBOT_SOCKET) \
+		--robot-id=$(LEROBOT_ROBOT_ID) \
+		$(ARGS)
