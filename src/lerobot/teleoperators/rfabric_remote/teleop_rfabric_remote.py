@@ -20,7 +20,7 @@ Topology (see ``REAL_TIME_CONTROL_BRIDGE.md``):
 
 ::
 
-    operator UI ──▶ LiveKit ──▶ rfabric-remote agent (Rust) ──▶ UDS socket
+    operator UI ──▶ signaling plane ──▶ rfabric-remote agent (Rust) ──▶ UDS socket
                                                                       │
                                                                       ▼
                                                        RFabricRemoteTeleop
@@ -472,7 +472,7 @@ def _observation_to_payload(observation: RobotObservation) -> dict[str, Any]:
     """Reduce an observation dict to a CBOR-friendly payload.
 
     Camera frames and other large tensors that travel through other
-    surfaces (LiveKit video tracks, the ingest pipeline) are dropped
+    surfaces (publisher video tracks, the ingest pipeline) are dropped
     here — only the proprioceptive scalar fields are mirrored back so
     the operator UI can render a live joint / pose overlay without the
     state channel becoming a bandwidth hotspot.

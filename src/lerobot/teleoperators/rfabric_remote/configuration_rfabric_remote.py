@@ -17,7 +17,7 @@
 
 This teleoperator binds a Unix-domain socket and accepts a connection
 from the local ``rfabric-remote`` agent. The agent forwards every
-operator -> robot CBOR ``Frame`` from the LiveKit data channel onto the
+operator -> robot CBOR ``Frame`` from the WebRTC data channel onto the
 socket; this teleoperator decodes them and returns lerobot-shaped
 actions to the standard ``lerobot-teleoperate`` loop.
 
