@@ -44,15 +44,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from rfabric_control_wire import (
+    PAYLOAD_END_EFFECTOR,
+    PAYLOAD_HOME,
+    PAYLOAD_JOINT_DELTAS,
+    PAYLOAD_JOINT_TARGETS,
+    PAYLOAD_JOINT_VELOCITY,
+    PAYLOAD_STOP,
+    PAYLOAD_TWIST,
+)
+
 from lerobot.types import RobotAction
 
-PAYLOAD_TWIST = "twist"
-PAYLOAD_STOP = "stop"
-PAYLOAD_HOME = "home"
-PAYLOAD_JOINT_TARGETS = "joint_targets"
-PAYLOAD_JOINT_DELTAS = "joint_deltas"
-PAYLOAD_JOINT_VELOCITY = "joint_velocity"
-PAYLOAD_END_EFFECTOR = "end_effector"
+__all__ = [
+    "PAYLOAD_END_EFFECTOR",
+    "PAYLOAD_HOME",
+    "PAYLOAD_JOINT_DELTAS",
+    "PAYLOAD_JOINT_TARGETS",
+    "PAYLOAD_JOINT_VELOCITY",
+    "PAYLOAD_STOP",
+    "PAYLOAD_TWIST",
+]
 
 EE_POSE_DELTA_FIELDS = (
     "enabled",

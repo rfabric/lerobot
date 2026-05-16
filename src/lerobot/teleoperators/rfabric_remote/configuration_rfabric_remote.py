@@ -67,6 +67,12 @@ class RFabricRemoteTeleopConfig(TeleoperatorConfig):
         arms: Arm tags advertised in the same capability frame, e.g.
             ``["left", "right"]`` for a bimanual follower. Empty for
             mobile / wheeled platforms.
+        joints: Per-arm joint name lists advertised in the capability
+            frame. The operator UI renders one control row per joint
+            here, in this order — so the names must match the joint
+            keys the follower expects in inbound ``joint_velocity`` /
+            ``joint_targets`` payloads. Keyed by arm tag (use ``""``
+            for the implicit single-arm slot).
         action_mode: Output shape ``get_action`` returns:
 
             * ``"ee_pose_delta"`` — emit
@@ -103,5 +109,6 @@ class RFabricRemoteTeleopConfig(TeleoperatorConfig):
         ]
     )
     arms: list[str] = field(default_factory=list)
+    joints: dict[str, list[str]] = field(default_factory=dict)
     action_mode: str = "joint_direct"
     motion_scale: dict[str, float] = field(default_factory=dict)

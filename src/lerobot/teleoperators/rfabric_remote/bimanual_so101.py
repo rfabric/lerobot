@@ -77,6 +77,18 @@ LOG = logging.getLogger(__name__)
 
 ARMS: tuple[str, str] = ("left", "right")
 
+# SO-101 motor schema (see ``lerobot.robots.so_follower.so_follower``).
+# Order matches the on-screen joint card the operator UI renders from
+# the capabilities frame's ``joints`` map.
+SO101_JOINT_NAMES: tuple[str, ...] = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
+
 # Teleop defaults: the operator UI emits a normalised velocity per
 # servo each tick. ``joint_step_deg`` is the per-tick angular gain at
 # full input — combined with the loop rate it sets the peak slew
@@ -581,6 +593,7 @@ def _build_teleop(args: argparse.Namespace) -> RFabricRemoteTeleop:
         watchdog_ms=args.watchdog_ms,
         accepts=["joint_velocity", "stop", "home"],
         arms=list(ARMS),
+        joints={arm: list(SO101_JOINT_NAMES) for arm in ARMS},
         action_mode=ACTION_MODE_JOINT_VELOCITY,
     )
     return RFabricRemoteTeleop(config)

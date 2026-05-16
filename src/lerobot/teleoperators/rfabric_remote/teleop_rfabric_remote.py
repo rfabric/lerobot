@@ -371,6 +371,7 @@ class RFabricRemoteTeleop(Teleoperator):
             "kind": "capabilities",
             "accepts": list(self.config.accepts),
             "arms": list(self.config.arms),
+            "joints": {arm: list(joints) for arm, joints in self.config.joints.items()},
         }
         frame = Frame(kind=MODE_KIND, seq=0, ts_ns=now_ts_ns(), payload=payload)
         try:
